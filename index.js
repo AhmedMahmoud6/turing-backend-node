@@ -11,13 +11,37 @@ app.use(express.json());
 const APPSCRIPT_URL = process.env.APPSCRIPT_URL;
 const APPSCRIPT_TOKEN = process.env.APPSCRIPT_TOKEN;
 
-// Initialize Firebase Admin (will use GOOGLE_APPLICATION_CREDENTIALS or default creds)
+// Initialize Firebase Admin.
+// On Railway you can provide the service account JSON as the
+// environment variable `GOOGLE_SERVICE_ACCOUNT` (one-line JSON string).
+// If not present we fall back to default credentials.
+let db;
 try {
-  admin.initializeApp();
+  if (process.env.GOOGLE_SERVICE_ACCOUNT) {
+    try {
+      const svc = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+      admin.initializeApp({ credential: admin.credential.cert(svc) });
+      console.log(
+        "Initialized firebase-admin using GOOGLE_SERVICE_ACCOUNT env"
+      );
+    } catch (err) {
+      console.error(
+        "Failed to parse GOOGLE_SERVICE_ACCOUNT JSON, falling back to default credentials:",
+        err
+      );
+      admin.initializeApp();
+    }
+  } else {
+    admin.initializeApp();
+    console.log("Initialized firebase-admin with default credentials");
+  }
+  db = admin.firestore();
 } catch (e) {
-  // ignore if already initialized in certain runtimes
+  console.error(
+    "Failed to initialize firebase-admin or obtain firestore instance:",
+    e
+  );
 }
-const db = admin.firestore();
 
 if (!APPSCRIPT_URL) {
   console.warn(
