@@ -276,7 +276,6 @@ app.post("/api/payment/session", async (req, res) => {
       console.error("Failed to write payment session to Firestore", err);
     }
 
-    return res.json({ success: true, sessionUrl: data.sessionUrl, raw: data });
   } catch (err) {
     console.error("create payment session error", err);
     return res.status(500).json({ error: String(err) });
