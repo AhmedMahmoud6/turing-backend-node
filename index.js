@@ -268,8 +268,9 @@ app.post("/api/payment/session", async (req, res) => {
 
     // Persist session with merchantOrderId for reconciliation
     try {
-      await db.collection("payments_details").add({
-        sessionId: data._id || data.sessionId || null,
+      const sessionId = data._id || data.sessionId || (data.data && data.data._id) || null;
+      const pdRef = await db.collection("payments_details").add({
+        sessionId,
         merchantOrderId: payload.order,
         status: data.status || "CREATED",
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -278,6 +279,18 @@ app.post("/api/payment/session", async (req, res) => {
         order: payload.order,
         response: data,
       });
+
+      // Also write a lightweight mapping into `payments` for quick lookup by merchantOrderId
+      try {
+        await db.collection("payments").add({
+          sessionId,
+          merchantOrderId: payload.order,
+          status: data.status || "CREATED",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } catch (merr) {
+        console.error("Failed to write payments mapping doc", merr);
+      }
     } catch (err) {
       console.error("Failed to write payment session to Firestore", err);
     }
@@ -294,12 +307,53 @@ app.post("/api/payment/session", async (req, res) => {
 app.post("/api/payment/webhook", async (req, res) => {
   try {
     const evt = req.body || {};
-    const sessionId =
-      evt.sessionId || evt._id || (evt.data && evt.data.sessionId);
+    let sessionId = evt.sessionId || evt._id || (evt.data && evt.data.sessionId) || null;
 
+    // If webhook doesn't include sessionId, try to find it by merchantOrderId or related fields
     if (!sessionId) {
-      console.warn("webhook missing sessionId", evt);
-      return res.status(400).send("missing sessionId");
+      console.warn("webhook missing sessionId, attempting lookup", evt);
+      const merchantOrderId =
+        evt.merchantOrderId || (evt.data && evt.data.merchantOrderId) || evt.order || (evt.data && evt.data.order) || null;
+
+      if (merchantOrderId && db) {
+        try {
+          const snap = await db.collection("payments").where("merchantOrderId", "==", merchantOrderId).limit(1).get();
+          if (!snap.empty) {
+            sessionId = snap.docs[0].data().sessionId || null;
+            console.log("Found sessionId via payments mapping", { merchantOrderId, sessionId });
+          } else {
+            // Try payments_details collection as fallback
+            const snap2 = await db.collection("payments_details").where("merchantOrderId", "==", merchantOrderId).limit(1).get();
+            if (!snap2.empty) {
+              sessionId = snap2.docs[0].data().sessionId || null;
+              console.log("Found sessionId via payments_details", { merchantOrderId, sessionId });
+            }
+          }
+        } catch (lookupErr) {
+          console.error("Error looking up sessionId by merchantOrderId", lookupErr);
+        }
+      }
+
+      // If still not found, attempt to read kashierOrderId / orderReference and match against nested response._id in payments_details
+      if (!sessionId) {
+        const kashierOrderId = evt.kashierOrderId || (evt.data && evt.data.kashierOrderId) || evt.orderReference || null;
+        if (kashierOrderId) {
+          try {
+            const snap3 = await db.collection("payments_details").where("response._id", "==", kashierOrderId).limit(1).get();
+            if (!snap3.empty) {
+              sessionId = snap3.docs[0].data().sessionId || null;
+              console.log("Found sessionId via payments_details.response._id", { kashierOrderId, sessionId });
+            }
+          } catch (nestedErr) {
+            console.error("Error looking up by kashierOrderId", nestedErr);
+          }
+        }
+      }
+
+      if (!sessionId) {
+        console.warn("webhook could not determine sessionId after lookup", evt);
+        return res.status(400).send("missing sessionId");
+      }
     }
 
     // Verify session with Kashier (do not trust webhook payload directly)
