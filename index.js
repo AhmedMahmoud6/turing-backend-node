@@ -599,7 +599,11 @@ app.post("/api/payment/fulfill", async (req, res) => {
 
       // Build apps script payload for ticket email (different template than workshop registration)
       const baseTicket = data.merchantOrderId || data.order || data.sessionId || `ticket-${Date.now()}`;
-      const packageId = data.metaData?.packageId || data.metaData?.package || "";
+      // prefer metaData from the verified payment object; fall back to stored doc or nested response
+      const packageId = (payment && (payment.metaData?.packageId || payment.metaData?.package))
+        || (data && (data.metaData?.packageId || data.metaData?.package))
+        || (data && data.response && data.response.metaData && (data.response.metaData.packageId || data.response.metaData.package))
+        || "";
       // default single ticket
       let ticketCodes = [baseTicket];
       let qrUrls = [ `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(baseTicket)}` ];
