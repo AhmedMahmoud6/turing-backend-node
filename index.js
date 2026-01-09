@@ -280,7 +280,6 @@ app.post("/api/payment/session", async (req, res) => {
         amount: payload.amount,
         currency: payload.currency,
         order: payload.order,
-        age: age || null,
         user: user || null,
         response: data,
       });
@@ -428,15 +427,25 @@ app.get("/api/payment/status", async (req, res) => {
   try {
     const { merchantOrderId, sessionId } = req.query || {};
     if (!merchantOrderId && !sessionId)
-      return res.status(400).json({ error: "missing merchantOrderId or sessionId" });
+      return res
+        .status(400)
+        .json({ error: "missing merchantOrderId or sessionId" });
 
     let docSnap = null;
     if (merchantOrderId) {
-      const snap = await db.collection("payments").where("merchantOrderId", "==", String(merchantOrderId)).limit(1).get();
+      const snap = await db
+        .collection("payments")
+        .where("merchantOrderId", "==", String(merchantOrderId))
+        .limit(1)
+        .get();
       if (!snap.empty) docSnap = snap.docs[0];
     }
     if (!docSnap && sessionId) {
-      const snap2 = await db.collection("payments").where("sessionId", "==", String(sessionId)).limit(1).get();
+      const snap2 = await db
+        .collection("payments")
+        .where("sessionId", "==", String(sessionId))
+        .limit(1)
+        .get();
       if (!snap2.empty) docSnap = snap2.docs[0];
     }
 
@@ -454,14 +463,26 @@ app.get("/api/payment/status", async (req, res) => {
           const verification = await fetchKashierSession(sid);
           const payment = verification.data || verification;
           const status = payment.status;
-          await docSnap.ref.update({ status, verification: payment, verifiedAt: admin.firestore.FieldValue.serverTimestamp() });
-          return res.json({ status, verified: successStates.includes(status), payment });
+          await docSnap.ref.update({
+            status,
+            verification: payment,
+            verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          return res.json({
+            status,
+            verified: successStates.includes(status),
+            payment,
+          });
         } catch (err) {
           console.error("status verify failed", err);
           return res.status(500).json({ error: "verification failed" });
         }
       }
-      return res.json({ status: data.status || null, verified: false, payment: data });
+      return res.json({
+        status: data.status || null,
+        verified: false,
+        payment: data,
+      });
     }
 
     // No doc found; if sessionId provided, try verifying and create doc
@@ -478,7 +499,11 @@ app.get("/api/payment/status", async (req, res) => {
           verification: payment,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-        return res.json({ status, verified: successStates.includes(status), payment });
+        return res.json({
+          status,
+          verified: successStates.includes(status),
+          payment,
+        });
       } catch (err) {
         console.error("verify-create failed", err);
         return res.status(500).json({ error: "verification failed" });
@@ -496,23 +521,44 @@ app.get("/api/payment/status", async (req, res) => {
 app.post("/api/payment/fulfill", async (req, res) => {
   try {
     const { merchantOrderId, sessionId } = req.body || {};
-    if (!merchantOrderId && !sessionId) return res.status(400).json({ error: "missing merchantOrderId or sessionId" });
+    if (!merchantOrderId && !sessionId)
+      return res
+        .status(400)
+        .json({ error: "missing merchantOrderId or sessionId" });
 
     // Find payments doc
     let snap = null;
-    if (merchantOrderId) snap = await db.collection("payments").where("merchantOrderId", "==", String(merchantOrderId)).limit(1).get();
-    if ((!snap || snap.empty) && sessionId) snap = await db.collection("payments").where("sessionId", "==", String(sessionId)).limit(1).get();
+    if (merchantOrderId)
+      snap = await db
+        .collection("payments")
+        .where("merchantOrderId", "==", String(merchantOrderId))
+        .limit(1)
+        .get();
+    if ((!snap || snap.empty) && sessionId)
+      snap = await db
+        .collection("payments")
+        .where("sessionId", "==", String(sessionId))
+        .limit(1)
+        .get();
 
     let doc = null;
     if (snap && !snap.empty) doc = snap.docs[0];
 
-    if (!doc) return res.status(404).json({ error: "payment record not found" });
+    if (!doc)
+      return res.status(404).json({ error: "payment record not found" });
 
     const data = doc.data();
     // Idempotency: if we've already sent a receipt, don't send again
     if (data.receiptSent) {
-      console.log("fulfill: receipt already sent, skipping", { merchantOrderId, sessionId });
-      return res.json({ ok: true, message: "receipt already sent", status: data.status });
+      console.log("fulfill: receipt already sent, skipping", {
+        merchantOrderId,
+        sessionId,
+      });
+      return res.json({
+        ok: true,
+        message: "receipt already sent",
+        status: data.status,
+      });
     }
     const sid = data.sessionId || sessionId;
 
@@ -529,16 +575,25 @@ app.post("/api/payment/fulfill", async (req, res) => {
     const status = payment.status;
     const successStates = ["PAID", "CAPTURED", "AUTHORIZED"];
     if (!successStates.includes(status)) {
-      await doc.ref.update({ status, verification: payment, verifiedAt: admin.firestore.FieldValue.serverTimestamp() });
+      await doc.ref.update({
+        status,
+        verification: payment,
+        verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
       return res.status(400).json({ error: "payment not successful", status });
     }
 
     // Payment is successful — send email via Apps Script if we have user/email
     const user = data.user || {};
-    const email = (user && user.email) || data.response?.customer?.email || null;
+    const email =
+      (user && user.email) || data.response?.customer?.email || null;
     if (!email) {
       // nothing to email
-      await doc.ref.update({ status, verification: payment, verifiedAt: admin.firestore.FieldValue.serverTimestamp() });
+      await doc.ref.update({
+        status,
+        verification: payment,
+        verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
       return res.json({ ok: true, message: "no email to send", status });
     }
 
@@ -570,10 +625,19 @@ app.post("/api/payment/fulfill", async (req, res) => {
         receiptSent: resp.ok,
         receiptResponse: text,
       });
-      return res.json({ ok: true, status, receiptSent: resp.ok, receiptResponse: text });
+      return res.json({
+        ok: true,
+        status,
+        receiptSent: resp.ok,
+        receiptResponse: text,
+      });
     } catch (err) {
       console.error("Apps Script send failed", err);
-      await doc.ref.update({ status, verification: payment, verifiedAt: admin.firestore.FieldValue.serverTimestamp() });
+      await doc.ref.update({
+        status,
+        verification: payment,
+        verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
       return res.status(500).json({ error: "apps script send failed" });
     }
   } catch (err) {
