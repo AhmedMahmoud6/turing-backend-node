@@ -600,13 +600,14 @@ app.post("/api/payment/fulfill", async (req, res) => {
       // Build apps script payload for ticket email (different template than workshop registration)
       const ticketCode = data.merchantOrderId || data.order || data.sessionId || `ticket-${Date.now()}`;
       const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(ticketCode)}`;
-      const checkUrl = `${process.env.SERVER_BASE || ""}/api/ticket/check?code=${encodeURIComponent(ticketCode)}`;
+      // ticketLink should point to a frontend verification page; set FRONTEND_BASE env to your frontend origin
+      const ticketLink = `${process.env.FRONTEND_BASE || ""}/ticket-verify?code=${encodeURIComponent(ticketCode)}`;
 
       const appsPayload = {
         template: "ticket",
         ticketCode,
         qrUrl,
-        ticketLink: checkUrl,
+        ticketLink,
         name: user.name || "",
         email,
         phone: user.phone || "",
@@ -663,25 +664,45 @@ app.get("/api/ticket/check", async (req, res) => {
     const { code } = req.query || {};
     if (!code) return res.status(400).json({ error: "missing code" });
 
+    // lookup by merchantOrderId or ticketCode, but do not mutate — this is a read-only endpoint
     const snap = await db.collection("payments").where("merchantOrderId", "==", String(code)).limit(1).get();
-    if (snap.empty) {
-      // also try ticketCode field
+    let doc = null;
+    if (!snap.empty) doc = snap.docs[0];
+    else {
       const snap2 = await db.collection("payments").where("ticketCode", "==", String(code)).limit(1).get();
-      if (snap2.empty) return res.status(404).json({ error: "ticket not found" });
-      const doc = snap2.docs[0];
-      const data = doc.data();
-      if (data.scannedAt) return res.json({ ok: false, message: "already scanned", scannedAt: data.scannedAt.toDate ? data.scannedAt.toDate() : data.scannedAt });
-      await doc.ref.update({ scannedAt: admin.firestore.FieldValue.serverTimestamp() });
-      return res.json({ ok: true, message: "checked in", user: data.user || null, ticketCode: code });
+      if (!snap2.empty) doc = snap2.docs[0];
     }
 
-    const doc = snap.docs[0];
+    if (!doc) return res.status(404).json({ error: "ticket not found" });
     const data = doc.data();
-    if (data.scannedAt) return res.json({ ok: false, message: "already scanned", scannedAt: data.scannedAt.toDate ? data.scannedAt.toDate() : data.scannedAt });
-    await doc.ref.update({ scannedAt: admin.firestore.FieldValue.serverTimestamp() });
-    return res.json({ ok: true, message: "checked in", user: data.user || null, ticketCode: code });
+    return res.json({ ok: true, found: true, scanned: !!data.scannedAt, scannedAt: data.scannedAt || null, user: data.user || null, ticketCode: data.ticketCode || code });
   } catch (err) {
     console.error("/api/ticket/check error", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/ticket/check  - mark ticket as scanned (idempotent)
+app.post("/api/ticket/check", async (req, res) => {
+  try {
+    const { code } = req.body || {};
+    if (!code) return res.status(400).json({ error: "missing code" });
+
+    const snap = await db.collection("payments").where("merchantOrderId", "==", String(code)).limit(1).get();
+    let doc = null;
+    if (!snap.empty) doc = snap.docs[0];
+    else {
+      const snap2 = await db.collection("payments").where("ticketCode", "==", String(code)).limit(1).get();
+      if (!snap2.empty) doc = snap2.docs[0];
+    }
+
+    if (!doc) return res.status(404).json({ error: "ticket not found" });
+    const data = doc.data();
+    if (data.scannedAt) return res.json({ ok: false, message: "already scanned", scannedAt: data.scannedAt });
+    await doc.ref.update({ scannedAt: admin.firestore.FieldValue.serverTimestamp() });
+    return res.json({ ok: true, message: "checked in", user: data.user || null, ticketCode: data.ticketCode || code });
+  } catch (err) {
+    console.error("POST /api/ticket/check error", err);
     return res.status(500).json({ error: String(err) });
   }
 });
