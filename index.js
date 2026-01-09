@@ -271,7 +271,7 @@ app.post("/api/payment/session", async (req, res) => {
     // Persist session with merchantOrderId for reconciliation
     try {
       const sessionId =
-        data._id || data.sessionId || (data.data && data.data._id) || null;
+        data.sessionId || data._id || (data.data && data.data._id) || null;
       const pdRef = await db.collection("payments").add({
         sessionId,
         merchantOrderId: payload.order,
@@ -597,17 +597,25 @@ app.post("/api/payment/fulfill", async (req, res) => {
       return res.json({ ok: true, message: "no email to send", status });
     }
 
-    // Build apps script payload
-    const appsPayload = {
-      name: user.name || "",
-      email,
-      phone: user.phone || "",
-      age: user.age || data.age || null,
-      program_id: data.order || "",
-      program_title: data.metaData?.packageId || "",
-      program_name: data.metaData?.packageId || "",
-      group_link: data.metaData?.group_link || "",
-    };
+      // Build apps script payload for ticket email (different template than workshop registration)
+      const ticketCode = data.merchantOrderId || data.order || data.sessionId || `ticket-${Date.now()}`;
+      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(ticketCode)}`;
+      const checkUrl = `${process.env.SERVER_BASE || ""}/api/ticket/check?code=${encodeURIComponent(ticketCode)}`;
+
+      const appsPayload = {
+        template: "ticket",
+        ticketCode,
+        qrUrl,
+        ticketLink: checkUrl,
+        name: user.name || "",
+        email,
+        phone: user.phone || "",
+        age: user.age || data.age || null,
+        program_id: data.order || "",
+        program_title: data.metaData?.packageId || "",
+        program_name: data.metaData?.packageId || "",
+        group_link: data.metaData?.group_link || "",
+      };
     if (APPSCRIPT_TOKEN) appsPayload.token = APPSCRIPT_TOKEN;
 
     // Attempt to send to Apps Script
@@ -618,13 +626,16 @@ app.post("/api/payment/fulfill", async (req, res) => {
         body: JSON.stringify(appsPayload),
       });
       const text = await resp.text();
-      await doc.ref.update({
-        status,
-        verification: payment,
-        verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-        receiptSent: resp.ok,
-        receiptResponse: text,
-      });
+        // save ticketCode and email send status atomically
+        await doc.ref.update({
+          status,
+          verification: payment,
+          verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+          receiptSent: resp.ok,
+          receiptResponse: text,
+          ticketCode,
+          qrUrl,
+        });
       return res.json({
         ok: true,
         status,
@@ -642,6 +653,35 @@ app.post("/api/payment/fulfill", async (req, res) => {
     }
   } catch (err) {
     console.error("/api/payment/fulfill error", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/ticket/check?code=...  - validate & mark QR ticket as scanned
+app.get("/api/ticket/check", async (req, res) => {
+  try {
+    const { code } = req.query || {};
+    if (!code) return res.status(400).json({ error: "missing code" });
+
+    const snap = await db.collection("payments").where("merchantOrderId", "==", String(code)).limit(1).get();
+    if (snap.empty) {
+      // also try ticketCode field
+      const snap2 = await db.collection("payments").where("ticketCode", "==", String(code)).limit(1).get();
+      if (snap2.empty) return res.status(404).json({ error: "ticket not found" });
+      const doc = snap2.docs[0];
+      const data = doc.data();
+      if (data.scannedAt) return res.json({ ok: false, message: "already scanned", scannedAt: data.scannedAt.toDate ? data.scannedAt.toDate() : data.scannedAt });
+      await doc.ref.update({ scannedAt: admin.firestore.FieldValue.serverTimestamp() });
+      return res.json({ ok: true, message: "checked in", user: data.user || null, ticketCode: code });
+    }
+
+    const doc = snap.docs[0];
+    const data = doc.data();
+    if (data.scannedAt) return res.json({ ok: false, message: "already scanned", scannedAt: data.scannedAt.toDate ? data.scannedAt.toDate() : data.scannedAt });
+    await doc.ref.update({ scannedAt: admin.firestore.FieldValue.serverTimestamp() });
+    return res.json({ ok: true, message: "checked in", user: data.user || null, ticketCode: code });
+  } catch (err) {
+    console.error("/api/ticket/check error", err);
     return res.status(500).json({ error: String(err) });
   }
 });
