@@ -209,6 +209,7 @@ app.post("/api/payment/session", async (req, res) => {
       customerEmail,
       customerReference,
       metaData,
+      age,
     } = req.body || {};
 
     if (!amount || !merchantRedirect)
@@ -242,7 +243,7 @@ app.post("/api/payment/session", async (req, res) => {
       retrieveSavedCard: false,
       saveCard: "optional",
       serverWebhook: `${process.env.SERVER_BASE}/api/payment/webhook`,
-      metaData: metaData || {},
+      metaData: Object.assign({}, metaData || {}, age ? { age } : {}),
     };
 
     const endpoint =
@@ -268,7 +269,8 @@ app.post("/api/payment/session", async (req, res) => {
 
     // Persist session with merchantOrderId for reconciliation
     try {
-      const sessionId = data._id || data.sessionId || (data.data && data.data._id) || null;
+      const sessionId =
+        data._id || data.sessionId || (data.data && data.data._id) || null;
       const pdRef = await db.collection("payments_details").add({
         sessionId,
         merchantOrderId: payload.order,
@@ -277,6 +279,7 @@ app.post("/api/payment/session", async (req, res) => {
         amount: payload.amount,
         currency: payload.currency,
         order: payload.order,
+        age: age || null,
         response: data,
       });
 
@@ -287,6 +290,7 @@ app.post("/api/payment/session", async (req, res) => {
           merchantOrderId: payload.order,
           status: data.status || "CREATED",
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          age: age || null,
         });
       } catch (merr) {
         console.error("Failed to write payments mapping doc", merr);
@@ -307,42 +311,75 @@ app.post("/api/payment/session", async (req, res) => {
 app.post("/api/payment/webhook", async (req, res) => {
   try {
     const evt = req.body || {};
-    let sessionId = evt.sessionId || evt._id || (evt.data && evt.data.sessionId) || null;
+    let sessionId =
+      evt.sessionId || evt._id || (evt.data && evt.data.sessionId) || null;
 
     // If webhook doesn't include sessionId, try to find it by merchantOrderId or related fields
     if (!sessionId) {
       console.warn("webhook missing sessionId, attempting lookup", evt);
       const merchantOrderId =
-        evt.merchantOrderId || (evt.data && evt.data.merchantOrderId) || evt.order || (evt.data && evt.data.order) || null;
+        evt.merchantOrderId ||
+        (evt.data && evt.data.merchantOrderId) ||
+        evt.order ||
+        (evt.data && evt.data.order) ||
+        null;
 
       if (merchantOrderId && db) {
         try {
-          const snap = await db.collection("payments").where("merchantOrderId", "==", merchantOrderId).limit(1).get();
+          const snap = await db
+            .collection("payments")
+            .where("merchantOrderId", "==", merchantOrderId)
+            .limit(1)
+            .get();
           if (!snap.empty) {
             sessionId = snap.docs[0].data().sessionId || null;
-            console.log("Found sessionId via payments mapping", { merchantOrderId, sessionId });
+            console.log("Found sessionId via payments mapping", {
+              merchantOrderId,
+              sessionId,
+            });
           } else {
             // Try payments_details collection as fallback
-            const snap2 = await db.collection("payments_details").where("merchantOrderId", "==", merchantOrderId).limit(1).get();
+            const snap2 = await db
+              .collection("payments_details")
+              .where("merchantOrderId", "==", merchantOrderId)
+              .limit(1)
+              .get();
             if (!snap2.empty) {
               sessionId = snap2.docs[0].data().sessionId || null;
-              console.log("Found sessionId via payments_details", { merchantOrderId, sessionId });
+              console.log("Found sessionId via payments_details", {
+                merchantOrderId,
+                sessionId,
+              });
             }
           }
         } catch (lookupErr) {
-          console.error("Error looking up sessionId by merchantOrderId", lookupErr);
+          console.error(
+            "Error looking up sessionId by merchantOrderId",
+            lookupErr
+          );
         }
       }
 
       // If still not found, attempt to read kashierOrderId / orderReference and match against nested response._id in payments_details
       if (!sessionId) {
-        const kashierOrderId = evt.kashierOrderId || (evt.data && evt.data.kashierOrderId) || evt.orderReference || null;
+        const kashierOrderId =
+          evt.kashierOrderId ||
+          (evt.data && evt.data.kashierOrderId) ||
+          evt.orderReference ||
+          null;
         if (kashierOrderId) {
           try {
-            const snap3 = await db.collection("payments_details").where("response._id", "==", kashierOrderId).limit(1).get();
+            const snap3 = await db
+              .collection("payments")
+              .where("response._id", "==", kashierOrderId)
+              .limit(1)
+              .get();
             if (!snap3.empty) {
               sessionId = snap3.docs[0].data().sessionId || null;
-              console.log("Found sessionId via payments_details.response._id", { kashierOrderId, sessionId });
+              console.log("Found sessionId via payments.response._id", {
+                kashierOrderId,
+                sessionId,
+              });
             }
           } catch (nestedErr) {
             console.error("Error looking up by kashierOrderId", nestedErr);
