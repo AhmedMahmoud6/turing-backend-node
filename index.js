@@ -247,7 +247,9 @@ app.post("/api/payment/session", async (req, res) => {
         ? "https://api.kashier.io/v3/payment/sessions"
         : "https://test-api.kashier.io/v3/payment/sessions";
 
-    const resp = await fetch(endpoint, {
+      console.log('Creating Kashier session', { endpoint });
+      console.log('Kashier payload', JSON.stringify(payload));
+      const resp = await fetch(endpoint, {
       method: "POST",
       headers: {
         Authorization: process.env.KASHIER_SECRET,
@@ -258,6 +260,7 @@ app.post("/api/payment/session", async (req, res) => {
     });
 
     const data = await resp.json();
+      console.log('Kashier response', { status: resp.status, data });
     if (!resp.ok) return res.status(502).json({ error: data });
 
     // Persist session with merchantOrderId for reconciliation
