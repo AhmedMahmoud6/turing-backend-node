@@ -700,7 +700,16 @@ app.get("/api/ticket/check", async (req, res) => {
 
     if (!doc) return res.status(404).json({ error: "ticket not found" });
     const data = doc.data();
-    return res.json({ ok: true, found: true, scanned: !!data.scannedAt, scannedAt: data.scannedAt || null, user: data.user || null, ticketCode: data.ticketCode || code });
+
+    // prefer per-code scanned map; fall back to legacy scannedAt for single-ticket docs
+    const key = encodeURIComponent(String(code));
+    const scannedMap = data.scannedMap || {};
+    const scannedEntry = scannedMap[key];
+    const scanned = !!scannedEntry || !!data.scannedAt;
+    const scannedAtRaw = scannedEntry || data.scannedAt || null;
+    const scannedAt = scannedAtRaw && scannedAtRaw.toDate ? scannedAtRaw.toDate().toISOString() : scannedAtRaw;
+
+    return res.json({ ok: true, found: true, scanned, scannedAt, user: data.user || null, ticketCode: data.ticketCode || code });
   } catch (err) {
     console.error("/api/ticket/check error", err);
     return res.status(500).json({ error: String(err) });
@@ -728,8 +737,25 @@ app.post("/api/ticket/check", async (req, res) => {
 
     if (!doc) return res.status(404).json({ error: "ticket not found" });
     const data = doc.data();
-    if (data.scannedAt) return res.json({ ok: false, message: "already scanned", scannedAt: data.scannedAt });
-    await doc.ref.update({ scannedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+    const key = encodeURIComponent(String(code));
+    const scannedMap = data.scannedMap || {};
+    // If this specific code is already scanned, return that info
+    if (scannedMap && scannedMap[key]) {
+      const existing = scannedMap[key];
+      const existingAt = existing && existing.toDate ? existing.toDate().toISOString() : existing;
+      return res.json({ ok: false, message: "already scanned", scannedAt: existingAt });
+    }
+
+    // mark only this code as scanned (idempotent per code)
+    const updateData = {};
+    updateData[`scannedMap.${key}`] = admin.firestore.FieldValue.serverTimestamp();
+    // for backward compatibility with single-ticket records, also set scannedAt
+    if (!data.ticketCodes || (Array.isArray(data.ticketCodes) && data.ticketCodes.length <= 1)) {
+      updateData.scannedAt = admin.firestore.FieldValue.serverTimestamp();
+    }
+
+    await doc.ref.update(updateData);
     return res.json({ ok: true, message: "checked in", user: data.user || null, ticketCode: data.ticketCode || code });
   } catch (err) {
     console.error("POST /api/ticket/check error", err);
