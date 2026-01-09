@@ -509,6 +509,11 @@ app.post("/api/payment/fulfill", async (req, res) => {
     if (!doc) return res.status(404).json({ error: "payment record not found" });
 
     const data = doc.data();
+    // Idempotency: if we've already sent a receipt, don't send again
+    if (data.receiptSent) {
+      console.log("fulfill: receipt already sent, skipping", { merchantOrderId, sessionId });
+      return res.json({ ok: true, message: "receipt already sent", status: data.status });
+    }
     const sid = data.sessionId || sessionId;
 
     // Verify with Kashier
