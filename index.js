@@ -598,23 +598,38 @@ app.post("/api/payment/fulfill", async (req, res) => {
     }
 
       // Build apps script payload for ticket email (different template than workshop registration)
-      const ticketCode = data.merchantOrderId || data.order || data.sessionId || `ticket-${Date.now()}`;
-      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(ticketCode)}`;
+      const baseTicket = data.merchantOrderId || data.order || data.sessionId || `ticket-${Date.now()}`;
+      const packageId = data.metaData?.packageId || data.metaData?.package || "";
+      // default single ticket
+      let ticketCodes = [baseTicket];
+      let qrUrls = [ `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(baseTicket)}` ];
+
+      // special-case: friends package -> generate 5 tickets
+      if (String(packageId).toLowerCase() === "friends") {
+        ticketCodes = Array.from({ length: 5 }, (_, i) => `${baseTicket}-${i + 1}`);
+        qrUrls = ticketCodes.map((c) => `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(c)}`);
+      }
+
       // ticketLink should point to a frontend verification page; set FRONTEND_BASE env to your frontend origin
-      const ticketLink = `${process.env.FRONTEND_BASE || ""}/ticket-verify?code=${encodeURIComponent(ticketCode)}`;
+      const ticketLinks = ticketCodes.map((c) => `${process.env.FRONTEND_BASE || ""}/ticket-verify?code=${encodeURIComponent(c)}`);
 
       const appsPayload = {
         template: "ticket",
-        ticketCode,
-        qrUrl,
-        ticketLink,
+        // for backward compatibility include single fields too
+        ticketCode: ticketCodes[0],
+        qrUrl: qrUrls[0],
+        ticketLink: ticketLinks[0],
+        // arrays for multi-ticket support
+        ticketCodes,
+        qrUrls,
+        ticketLinks,
         name: user.name || "",
         email,
         phone: user.phone || "",
         age: user.age || data.age || null,
         program_id: data.order || "",
-        program_title: data.metaData?.packageId || "",
-        program_name: data.metaData?.packageId || "",
+        program_title: packageId || "",
+        program_name: packageId || "",
         group_link: data.metaData?.group_link || "",
       };
     if (APPSCRIPT_TOKEN) appsPayload.token = APPSCRIPT_TOKEN;
@@ -627,15 +642,17 @@ app.post("/api/payment/fulfill", async (req, res) => {
         body: JSON.stringify(appsPayload),
       });
       const text = await resp.text();
-        // save ticketCode and email send status atomically
+        // save ticketCodes and email send status atomically
         await doc.ref.update({
           status,
           verification: payment,
           verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
           receiptSent: resp.ok,
           receiptResponse: text,
-          ticketCode,
-          qrUrl,
+          ticketCode: ticketCodes[0],
+          ticketCodes,
+          qrUrl: qrUrls[0],
+          qrUrls,
         });
       return res.json({
         ok: true,
@@ -664,13 +681,17 @@ app.get("/api/ticket/check", async (req, res) => {
     const { code } = req.query || {};
     if (!code) return res.status(400).json({ error: "missing code" });
 
-    // lookup by merchantOrderId or ticketCode, but do not mutate — this is a read-only endpoint
-    const snap = await db.collection("payments").where("merchantOrderId", "==", String(code)).limit(1).get();
+    // lookup by merchantOrderId OR single ticketCode OR in ticketCodes array
     let doc = null;
+    const snap = await db.collection("payments").where("merchantOrderId", "==", String(code)).limit(1).get();
     if (!snap.empty) doc = snap.docs[0];
-    else {
+    if (!doc) {
       const snap2 = await db.collection("payments").where("ticketCode", "==", String(code)).limit(1).get();
       if (!snap2.empty) doc = snap2.docs[0];
+    }
+    if (!doc) {
+      const snap3 = await db.collection("payments").where("ticketCodes", "array-contains", String(code)).limit(1).get();
+      if (!snap3.empty) doc = snap3.docs[0];
     }
 
     if (!doc) return res.status(404).json({ error: "ticket not found" });
@@ -688,12 +709,17 @@ app.post("/api/ticket/check", async (req, res) => {
     const { code } = req.body || {};
     if (!code) return res.status(400).json({ error: "missing code" });
 
-    const snap = await db.collection("payments").where("merchantOrderId", "==", String(code)).limit(1).get();
+    // find by merchantOrderId, ticketCode, or in ticketCodes array
     let doc = null;
+    const snap = await db.collection("payments").where("merchantOrderId", "==", String(code)).limit(1).get();
     if (!snap.empty) doc = snap.docs[0];
-    else {
+    if (!doc) {
       const snap2 = await db.collection("payments").where("ticketCode", "==", String(code)).limit(1).get();
       if (!snap2.empty) doc = snap2.docs[0];
+    }
+    if (!doc) {
+      const snap3 = await db.collection("payments").where("ticketCodes", "array-contains", String(code)).limit(1).get();
+      if (!snap3.empty) doc = snap3.docs[0];
     }
 
     if (!doc) return res.status(404).json({ error: "ticket not found" });
