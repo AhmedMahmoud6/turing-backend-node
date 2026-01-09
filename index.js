@@ -174,6 +174,180 @@ app.post("/api/register", async (req, res) => {
   }
 });
 
+// Helper: verify session via Kashier GET API
+async function fetchKashierSession(sessionId) {
+  const base =
+    process.env.KASHIER_MODE === "live"
+      ? "https://api.kashier.io"
+      : "https://test-api.kashier.io";
+  const url = `${base}/v3/payment/sessions/${sessionId}/payment`;
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: process.env.KASHIER_SECRET,
+      "api-key": process.env.KASHIER_API_KEY,
+      "Content-Type": "application/json",
+    },
+  });
+  const data = await resp.json();
+  if (!resp.ok)
+    throw new Error(
+      `Kashier verify failed: ${resp.status} ${JSON.stringify(data)}`
+    );
+  return data; // data.data is the payment object per Kashier docs
+}
+
+// POST /api/payment/session
+app.post("/api/payment/session", async (req, res) => {
+  try {
+    const {
+      amount,
+      currency = "EGP",
+      order = "order-" + Date.now(),
+      merchantRedirect,
+      description,
+      customerEmail,
+      customerReference,
+      metaData,
+    } = req.body || {};
+
+    if (!amount || !merchantRedirect)
+      return res
+        .status(400)
+        .json({ error: "missing amount or merchantRedirect" });
+    if (Number(amount) <= 0)
+      return res.status(400).json({ error: "invalid amount" });
+
+    const payload = {
+      expireAt: new Date(Date.now() + 1000 * 60 * 60).toISOString(),
+      maxFailureAttempts: 3,
+      paymentType: "credit",
+      amount: String(amount),
+      currency,
+      order, // merchantOrderId / order
+      merchantRedirect: merchantRedirect, // frontend must send a raw URL; encode only once here if needed
+      display: "en",
+      type: "one-time",
+      allowedMethods: "card,wallet",
+      merchantId: process.env.KASHIER_MERCHANT_ID,
+      failureRedirect: false,
+      defaultMethod: "card",
+      description: description || `Payment for ${order}`,
+      customer: {
+        email: customerEmail || "",
+        reference: customerReference || "",
+      },
+      mode: process.env.KASHIER_MODE || "test",
+      serverWebhook: `${process.env.SERVER_BASE}/api/payment/webhook`,
+      metaData: metaData || {},
+    };
+
+    const endpoint =
+      process.env.KASHIER_MODE === "live"
+        ? "https://api.kashier.io/v3/payment/sessions"
+        : "https://test-api.kashier.io/v3/payment/sessions";
+
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: process.env.KASHIER_SECRET,
+        "api-key": process.env.KASHIER_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) return res.status(502).json({ error: data });
+
+    // Persist session with merchantOrderId for reconciliation
+    try {
+      await db.collection("payments").add({
+        sessionId: data._id || data.sessionId || null,
+        merchantOrderId: payload.order,
+        status: data.status || "CREATED",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        amount: payload.amount,
+        currency: payload.currency,
+        order: payload.order,
+        response: data,
+      });
+    } catch (err) {
+      console.error("Failed to write payment session to Firestore", err);
+    }
+
+    return res.json({ success: true, sessionUrl: data.sessionUrl, raw: data });
+  } catch (err) {
+    console.error("create payment session error", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/payment/webhook
+app.post("/api/payment/webhook", async (req, res) => {
+  try {
+    const evt = req.body || {};
+    const sessionId =
+      evt.sessionId || evt._id || (evt.data && evt.data.sessionId);
+
+    if (!sessionId) {
+      console.warn("webhook missing sessionId", evt);
+      return res.status(400).send("missing sessionId");
+    }
+
+    // Verify session with Kashier (do not trust webhook payload directly)
+    let verification;
+    try {
+      verification = await fetchKashierSession(sessionId);
+    } catch (err) {
+      console.error("Failed to verify session with Kashier", err);
+      return res.status(500).send("verification failed");
+    }
+
+    // Kashier returns { message, data: { ...payment... } }
+    const payment = verification.data || verification;
+    const status = payment.status;
+    const orderId = payment.merchantOrderId || payment.order || null;
+
+    // Only consider these as final/success states (adjust as needed)
+    const successStates = ["PAID", "CAPTURED", "AUTHORIZED"];
+
+    // Idempotent update: only update if status changed (and create if missing)
+    const snapshot = await db
+      .collection("payments")
+      .where("sessionId", "==", sessionId)
+      .limit(1)
+      .get();
+    if (!snapshot.empty) {
+      const doc = snapshot.docs[0];
+      const prev = doc.data().status;
+      if (prev !== status) {
+        await doc.ref.update({
+          status,
+          verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+          verification: payment,
+        });
+      }
+    } else {
+      await db.collection("payments").add({
+        sessionId,
+        orderId,
+        status,
+        verification: payment,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    // You can trigger post-payment work here if status is in successStates
+    // e.g., fulfill order, mark registration paid, send receipt, etc.
+
+    return res.status(200).send("OK");
+  } catch (err) {
+    console.error("webhook handler error", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
 const port = process.env.PORT || 5000; // Railway will provide the port
 app.listen(port, () => console.log(`Backend listening on port ${port}`));
 
