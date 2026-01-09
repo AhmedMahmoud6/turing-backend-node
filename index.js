@@ -237,7 +237,6 @@ app.post("/api/payment/session", async (req, res) => {
         email: customerEmail || "",
         reference: customerReference || "",
       },
-      mode: process.env.KASHIER_MODE || "test",
       serverWebhook: `${process.env.SERVER_BASE}/api/payment/webhook`,
       metaData: metaData || {},
     };
@@ -278,6 +277,9 @@ app.post("/api/payment/session", async (req, res) => {
     } catch (err) {
       console.error("Failed to write payment session to Firestore", err);
     }
+
+    // Return sessionUrl to client
+    return res.json({ success: true, sessionUrl: data.sessionUrl, raw: data });
 
   } catch (err) {
     console.error("create payment session error", err);
