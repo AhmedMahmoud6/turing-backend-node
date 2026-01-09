@@ -423,6 +423,160 @@ app.post("/api/payment/webhook", async (req, res) => {
   }
 });
 
+// GET /api/payment/status?merchantOrderId=... or ?sessionId=...
+app.get("/api/payment/status", async (req, res) => {
+  try {
+    const { merchantOrderId, sessionId } = req.query || {};
+    if (!merchantOrderId && !sessionId)
+      return res.status(400).json({ error: "missing merchantOrderId or sessionId" });
+
+    let docSnap = null;
+    if (merchantOrderId) {
+      const snap = await db.collection("payments").where("merchantOrderId", "==", String(merchantOrderId)).limit(1).get();
+      if (!snap.empty) docSnap = snap.docs[0];
+    }
+    if (!docSnap && sessionId) {
+      const snap2 = await db.collection("payments").where("sessionId", "==", String(sessionId)).limit(1).get();
+      if (!snap2.empty) docSnap = snap2.docs[0];
+    }
+
+    // If we have a stored doc and it's final, return it
+    const successStates = ["PAID", "CAPTURED", "AUTHORIZED"];
+    if (docSnap) {
+      const data = docSnap.data();
+      if (successStates.includes((data.status || "").toUpperCase())) {
+        return res.json({ status: data.status, verified: true, payment: data });
+      }
+      // otherwise attempt to verify with Kashier if sessionId present
+      const sid = data.sessionId || sessionId;
+      if (sid) {
+        try {
+          const verification = await fetchKashierSession(sid);
+          const payment = verification.data || verification;
+          const status = payment.status;
+          await docSnap.ref.update({ status, verification: payment, verifiedAt: admin.firestore.FieldValue.serverTimestamp() });
+          return res.json({ status, verified: successStates.includes(status), payment });
+        } catch (err) {
+          console.error("status verify failed", err);
+          return res.status(500).json({ error: "verification failed" });
+        }
+      }
+      return res.json({ status: data.status || null, verified: false, payment: data });
+    }
+
+    // No doc found; if sessionId provided, try verifying and create doc
+    if (sessionId) {
+      try {
+        const verification = await fetchKashierSession(String(sessionId));
+        const payment = verification.data || verification;
+        const status = payment.status;
+        // persist minimal doc
+        const ref = await db.collection("payments").add({
+          sessionId: sessionId,
+          merchantOrderId: payment.merchantOrderId || payment.order || null,
+          status,
+          verification: payment,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return res.json({ status, verified: successStates.includes(status), payment });
+      } catch (err) {
+        console.error("verify-create failed", err);
+        return res.status(500).json({ error: "verification failed" });
+      }
+    }
+
+    return res.status(404).json({ error: "not found" });
+  } catch (err) {
+    console.error("/api/payment/status error", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/payment/fulfill  { merchantOrderId || sessionId }
+app.post("/api/payment/fulfill", async (req, res) => {
+  try {
+    const { merchantOrderId, sessionId } = req.body || {};
+    if (!merchantOrderId && !sessionId) return res.status(400).json({ error: "missing merchantOrderId or sessionId" });
+
+    // Find payments doc
+    let snap = null;
+    if (merchantOrderId) snap = await db.collection("payments").where("merchantOrderId", "==", String(merchantOrderId)).limit(1).get();
+    if ((!snap || snap.empty) && sessionId) snap = await db.collection("payments").where("sessionId", "==", String(sessionId)).limit(1).get();
+
+    let doc = null;
+    if (snap && !snap.empty) doc = snap.docs[0];
+
+    if (!doc) return res.status(404).json({ error: "payment record not found" });
+
+    const data = doc.data();
+    const sid = data.sessionId || sessionId;
+
+    // Verify with Kashier
+    let verification;
+    try {
+      verification = await fetchKashierSession(sid);
+    } catch (err) {
+      console.error("fulfill: verify failed", err);
+      return res.status(500).json({ error: "verification failed" });
+    }
+
+    const payment = verification.data || verification;
+    const status = payment.status;
+    const successStates = ["PAID", "CAPTURED", "AUTHORIZED"];
+    if (!successStates.includes(status)) {
+      await doc.ref.update({ status, verification: payment, verifiedAt: admin.firestore.FieldValue.serverTimestamp() });
+      return res.status(400).json({ error: "payment not successful", status });
+    }
+
+    // Payment is successful — send email via Apps Script if we have user/email
+    const user = data.user || {};
+    const email = (user && user.email) || data.response?.customer?.email || null;
+    if (!email) {
+      // nothing to email
+      await doc.ref.update({ status, verification: payment, verifiedAt: admin.firestore.FieldValue.serverTimestamp() });
+      return res.json({ ok: true, message: "no email to send", status });
+    }
+
+    // Build apps script payload
+    const appsPayload = {
+      name: user.name || "",
+      email,
+      phone: user.phone || "",
+      age: user.age || data.age || null,
+      program_id: data.order || "",
+      program_title: data.metaData?.packageId || "",
+      program_name: data.metaData?.packageId || "",
+      group_link: data.metaData?.group_link || "",
+    };
+    if (APPSCRIPT_TOKEN) appsPayload.token = APPSCRIPT_TOKEN;
+
+    // Attempt to send to Apps Script
+    try {
+      const resp = await fetch(APPSCRIPT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(appsPayload),
+      });
+      const text = await resp.text();
+      await doc.ref.update({
+        status,
+        verification: payment,
+        verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+        receiptSent: resp.ok,
+        receiptResponse: text,
+      });
+      return res.json({ ok: true, status, receiptSent: resp.ok, receiptResponse: text });
+    } catch (err) {
+      console.error("Apps Script send failed", err);
+      await doc.ref.update({ status, verification: payment, verifiedAt: admin.firestore.FieldValue.serverTimestamp() });
+      return res.status(500).json({ error: "apps script send failed" });
+    }
+  } catch (err) {
+    console.error("/api/payment/fulfill error", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
 const port = process.env.PORT || 5000; // Railway will provide the port
 app.listen(port, () => console.log(`Backend listening on port ${port}`));
 
