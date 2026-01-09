@@ -240,7 +240,7 @@ app.post("/api/payment/session", async (req, res) => {
       // Disable saved-card retrieval to avoid Kashier UI attempting a browser GET
       // to the cards endpoint (which lacks Authorization headers and returns 400).
       retrieveSavedCard: false,
-      saveCard: 'optional',
+      saveCard: "optional",
       serverWebhook: `${process.env.SERVER_BASE}/api/payment/webhook`,
       metaData: metaData || {},
     };
@@ -250,9 +250,9 @@ app.post("/api/payment/session", async (req, res) => {
         ? "https://api.kashier.io/v3/payment/sessions"
         : "https://test-api.kashier.io/v3/payment/sessions";
 
-      console.log('Creating Kashier session', { endpoint });
-      console.log('Kashier payload', JSON.stringify(payload));
-      const resp = await fetch(endpoint, {
+    console.log("Creating Kashier session", { endpoint });
+    console.log("Kashier payload", JSON.stringify(payload));
+    const resp = await fetch(endpoint, {
       method: "POST",
       headers: {
         Authorization: process.env.KASHIER_SECRET,
@@ -263,12 +263,12 @@ app.post("/api/payment/session", async (req, res) => {
     });
 
     const data = await resp.json();
-      console.log('Kashier response', { status: resp.status, data });
+    console.log("Kashier response", { status: resp.status, data });
     if (!resp.ok) return res.status(502).json({ error: data });
 
     // Persist session with merchantOrderId for reconciliation
     try {
-      await db.collection("payments").add({
+      await db.collection("payments_details").add({
         sessionId: data._id || data.sessionId || null,
         merchantOrderId: payload.order,
         status: data.status || "CREATED",
@@ -284,7 +284,6 @@ app.post("/api/payment/session", async (req, res) => {
 
     // Return sessionUrl to client
     return res.json({ success: true, sessionUrl: data.sessionUrl, raw: data });
-
   } catch (err) {
     console.error("create payment session error", err);
     return res.status(500).json({ error: String(err) });
