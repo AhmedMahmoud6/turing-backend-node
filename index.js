@@ -237,6 +237,10 @@ app.post("/api/payment/session", async (req, res) => {
         email: customerEmail || "",
         reference: customerReference || "",
       },
+      // Disable saved-card retrieval to avoid Kashier UI attempting a browser GET
+      // to the cards endpoint (which lacks Authorization headers and returns 400).
+      retrieveSavedCard: false,
+      saveCard: 'optional',
       serverWebhook: `${process.env.SERVER_BASE}/api/payment/webhook`,
       metaData: metaData || {},
     };
