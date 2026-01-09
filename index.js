@@ -210,6 +210,7 @@ app.post("/api/payment/session", async (req, res) => {
       customerReference,
       metaData,
       age,
+      user,
     } = req.body || {};
 
     if (!amount || !merchantRedirect)
@@ -271,7 +272,7 @@ app.post("/api/payment/session", async (req, res) => {
     try {
       const sessionId =
         data._id || data.sessionId || (data.data && data.data._id) || null;
-      const pdRef = await db.collection("payments_details").add({
+      const pdRef = await db.collection("payments").add({
         sessionId,
         merchantOrderId: payload.order,
         status: data.status || "CREATED",
@@ -280,6 +281,7 @@ app.post("/api/payment/session", async (req, res) => {
         currency: payload.currency,
         order: payload.order,
         age: age || null,
+        user: user || null,
         response: data,
       });
 
@@ -291,6 +293,7 @@ app.post("/api/payment/session", async (req, res) => {
           status: data.status || "CREATED",
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           age: age || null,
+          user: user || null,
         });
       } catch (merr) {
         console.error("Failed to write payments mapping doc", merr);
@@ -338,15 +341,15 @@ app.post("/api/payment/webhook", async (req, res) => {
               sessionId,
             });
           } else {
-            // Try payments_details collection as fallback
+            // Try payments collection as fallback
             const snap2 = await db
-              .collection("payments_details")
+              .collection("payments")
               .where("merchantOrderId", "==", merchantOrderId)
               .limit(1)
               .get();
             if (!snap2.empty) {
               sessionId = snap2.docs[0].data().sessionId || null;
-              console.log("Found sessionId via payments_details", {
+              console.log("Found sessionId via payments", {
                 merchantOrderId,
                 sessionId,
               });
@@ -360,7 +363,7 @@ app.post("/api/payment/webhook", async (req, res) => {
         }
       }
 
-      // If still not found, attempt to read kashierOrderId / orderReference and match against nested response._id in payments_details
+      // If still not found, attempt to read kashierOrderId / orderReference and match against nested response._id in payments
       if (!sessionId) {
         const kashierOrderId =
           evt.kashierOrderId ||
