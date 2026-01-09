@@ -285,19 +285,7 @@ app.post("/api/payment/session", async (req, res) => {
         response: data,
       });
 
-      // Also write a lightweight mapping into `payments` for quick lookup by merchantOrderId
-      try {
-        await db.collection("payments").add({
-          sessionId,
-          merchantOrderId: payload.order,
-          status: data.status || "CREATED",
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          age: age || null,
-          user: user || null,
-        });
-      } catch (merr) {
-        console.error("Failed to write payments mapping doc", merr);
-      }
+      // single payments document written above; no duplicate mapping needed
     } catch (err) {
       console.error("Failed to write payment session to Firestore", err);
     }
@@ -340,20 +328,6 @@ app.post("/api/payment/webhook", async (req, res) => {
               merchantOrderId,
               sessionId,
             });
-          } else {
-            // Try payments collection as fallback
-            const snap2 = await db
-              .collection("payments")
-              .where("merchantOrderId", "==", merchantOrderId)
-              .limit(1)
-              .get();
-            if (!snap2.empty) {
-              sessionId = snap2.docs[0].data().sessionId || null;
-              console.log("Found sessionId via payments", {
-                merchantOrderId,
-                sessionId,
-              });
-            }
           }
         } catch (lookupErr) {
           console.error(
